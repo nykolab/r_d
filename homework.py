@@ -154,4 +154,4 @@ def dump_db_to_disk():
 
 if __name__ == "__main__":
     dump_api_to_disk()
-    # dump_db_to_disk()
+    dump_db_to_disk()
