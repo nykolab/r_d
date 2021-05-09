@@ -1,0 +1,20 @@
+{
+    "base_url": "https://robot-dreams-de-api.herokuapp.com",
+    "auth_endpoint": "auth",
+    "out_endpoint": "out_of_stock",
+    "auth_type": "jwt",
+    "content_type": "application/json",
+    "username": "rd_dreams",
+    "password": "djT6LasE",
+    "date_to_extract": 
+        {
+            "date": "2021-01-04"
+        },
+
+    "db_dump_folder": "/home/user/Data/data_eng_homework/db_dump",
+    "dbname" : "dshop",
+    "db_user" : "pguser",
+    "db_password" : "secret",
+    "db_host" : ""
+
+}
