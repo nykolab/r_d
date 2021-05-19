@@ -15,6 +15,11 @@
     "dbname" : "dshop",
     "db_user" : "pguser",
     "db_password" : "secret",
-    "db_host" : ""
+    "db_host" : "localhost",
+
+    "hdfs_uri" : "http://127.0.0.1:50070/",
+    "hdfs_user" : "user",
+    "hdfs_db_folder" : "/bronze/db_dump",
+    "hdfs_api_folder" : "/bronze/api_dump"
 
 }

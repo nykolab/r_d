@@ -6,6 +6,9 @@ import os
 
 import psycopg2
 
+from contextlib import closing
+from hdfs import InsecureClient
+from datetime import datetime
 
 CONFIG_FILE="config.json"
 
@@ -114,8 +117,6 @@ def dump_api_to_disk():
 
 def dump_db_to_disk():
 
-    from contextlib import closing
-
     config_data = read_config(CONFIG_FILE)
 
     if not config_data:
@@ -134,7 +135,7 @@ def dump_db_to_disk():
                 "dbname"   : dbname, 
                 "user"     : db_user, 
                 "password" : db_password, 
-                "host"     : "localhost"}
+                "host"     : db_host}
 
     with closing(psycopg2.connect(**db_creds)) as conn:
         with conn.cursor() as cursor:
@@ -146,12 +147,103 @@ def dump_db_to_disk():
                 table_name = table_name[0]
                 logger.debug(f"Processing table {table_name}")
 
-                with open(f"{db_dump_folder}/{table_name}", "w+") as output_file:   
+                with open(f"{db_dump_folder}/{table_name}.csv", "w+") as output_file:   
                     cursor.copy_expert(f"COPY {table_name} TO STDOUT WITH HEADER CSV", output_file)
- 
+
+def dump_api_to_hdfs():
+
+    config_data = read_config(CONFIG_FILE)
+
+    if not config_data:
+        sys.exit()
+
+    # Get parameters
+    base_url = config_data.get("base_url")
+    auth_endpoint = config_data.get("auth_endpoint")
+    out_endpoint = config_data.get("out_endpoint")
+    auth_type = config_data.get("auth_type")
+    content_type = config_data.get("content_type")
+    username = config_data.get("username")
+    password = config_data.get("password")
+    date_to_extract = config_data.get("date_to_extract")
+    
+    hdfs_uri = config_data.get("hdfs_uri")
+    hdfs_user = config_data.get("hdfs_user")
+    hdfs_api_folder = config_data.get("hdfs_api_folder")
+
+    # Get auth token
+    token = get_auth_token(base_url, auth_endpoint, content_type, username, password)
+
+    if token:
+        jwt_token = f"{auth_type} {token}"
+
+        # Request data
+        data = get_api_data(base_url, out_endpoint, jwt_token, content_type, date_to_extract)
+        
+        if not data:
+            logger.error("No data returned, exiting")
+            sys.exit()
+
+        client = InsecureClient(hdfs_uri, user=hdfs_user)
+
+        client.makedirs(f'{hdfs_api_folder}')
+
+        # Finally process data and save to hdfs
+        date = date_to_extract.get("date")
+        folder = f"{hdfs_api_folder}/{date}"
+
+        with client.write(f'{folder}/data.json', encoding='utf-8') as output_file:
+            json.dump(data, output_file, indent=4)
+            # logger.debug(f"Data saved to {folder}/data.json")
+
+
+def dump_db_to_hdfs():
+
+    config_data = read_config(CONFIG_FILE)
+
+    if not config_data:
+        sys.exit()
+
+    dbname = config_data.get("dbname")
+    db_user = config_data.get("db_user")
+    db_password = config_data.get("db_password")
+    db_host = config_data.get("db_host")
+
+    hdfs_uri = config_data.get("hdfs_uri")
+    hdfs_user = config_data.get("hdfs_user")
+    hdfs_db_folder = config_data.get("hdfs_db_folder")
+
+    db_creds = {
+                "dbname"   : dbname, 
+                "user"     : db_user, 
+                "password" : db_password, 
+                "host"     : db_host}
+
+    client = InsecureClient(hdfs_uri, user=hdfs_user)
+
+    client.makedirs(f'{hdfs_db_folder}')
+
+    with closing(psycopg2.connect(**db_creds)) as conn:
+        with conn.cursor() as cursor:
+
+            # Get all the tables names
+            cursor.execute("SELECT table_name FROM information_schema.tables where table_schema='public'")
+
+            tables = set(t[0] for t in cursor.fetchall())
+            for table_name in tables:
+
+                logger.debug(f"Processing table {table_name}")
+
+                today = datetime.today().strftime("%m_%d_%Y")
+
+                with client.write(f'{hdfs_db_folder}/{today}/{table_name}.csv') as output_file:
+                    cursor.copy_expert(f"COPY {table_name} TO STDOUT WITH HEADER CSV", output_file)
+
 
 ############################################
 
 if __name__ == "__main__":
-    dump_api_to_disk()
-    dump_db_to_disk()
+    # dump_api_to_disk()
+    # dump_db_to_disk()
+    # dump_api_to_hdfs()
+    # dump_db_to_hdfs()
