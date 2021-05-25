@@ -124,10 +124,6 @@ def process_api_hdfs():
     api_data = get_api_data(config_data)
 
 
-
-
-
-
     # Get auth token
     token = get_auth_token(base_url, auth_endpoint, content_type, username, password)
 
@@ -200,7 +196,7 @@ def process_table_disk(table_name):
 ############################################
 
 if __name__ == "__main__":
-
+    pass
     # with concurrent.futures.ThreadPoolExecutor() as executor:
     #     executor.map(process_table_hdfs, get_table_names())
-    process_api_disk()
+
