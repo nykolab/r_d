@@ -18,6 +18,7 @@ import sys
 
 from pyspark.sql import SparkSession
 
+import concurrent.futures
 
 # Today
 TODAY = datetime.today().strftime("%Y-%d-%m") 
@@ -60,23 +61,28 @@ def get_db_creds():
                 "host"     : db_connection.host,
             }
 
+# Greenplum creds
+
+def get_gp_creds():
+    gp_connection = BaseHook.get_connection("gp_local")
+    gp_extras = gp_connection.extra_dejson
+
+    return {
+                "dbname"   : gp_extras.get("dbname"), 
+                "user"     : gp_connection.login, 
+                "password" : gp_connection.password, 
+                "host"     : gp_connection.host,
+                "port"     : gp_connection.port,
+            }
+
 ##########################################################
 
 def get_table_names():
-
-    db_creds = get_db_creds()
-    with closing(psycopg2.connect(**db_creds)) as conn:
-        with conn.cursor() as cursor:
-
-            # Get all the tables names
-            cursor.execute("SELECT table_name FROM information_schema.tables where table_schema='public'")
-
-            return set(t[0] for t in cursor.fetchall())
+    return ["orders", "products", "departments", "aisles", "clients", "stores", "store_types", "location_areas"]
 
 
 def process_table_hdfs(table_name):
 
-    
     db_creds = get_db_creds()
 
     with closing(psycopg2.connect(**db_creds)) as conn:
@@ -171,9 +177,9 @@ def process_api_hdfs():
         folder = f"{hdfs_api_folder}/{TODAY}"
         hdfs_client.makedirs(f'{folder}')
 
-        with hdfs_client.write(f'{folder}/data.json', encoding='utf-8') as output_file:
+        with hdfs_client.write(f'{folder}/out_of_stock.json', encoding='utf-8') as output_file:
             json.dump(data, output_file, indent=4)
-            logging.info(f"API Data saved to {folder}/data.json")
+            logging.info(f"API Data saved to {folder}/out_of_stock.json")
 
 ###########################################
 #### Silver layer processing
@@ -183,7 +189,7 @@ def api_to_silver():
 
     _, hdfs_params = get_hdfs_params()
     hdfs_api_folder = hdfs_params.get("hdfs_api_folder")
-    api_file = f"{hdfs_api_folder}/{TODAY}/data.json"
+    api_file = f"{hdfs_api_folder}/{TODAY}/out_of_stock.json"
 
     # Create spark session and read data from HDFS to parquet files
 
@@ -196,12 +202,14 @@ def api_to_silver():
 
     api_df = spark.read.option("multiline", "true")\
                     .json(f"{api_file}")\
-                    .drop('date')\
-                    .orderBy("product_id")
 
-    logging.info(f"Saving API to silver.")
-    api_df.write\
-        .parquet(f"/silver/api/{TODAY}/data", mode='overwrite')
+    if validate_api_data(api_df):
+
+        logging.info(f"Saving API to silver.")
+        api_df.write\
+            .parquet(f"/silver/{TODAY}/out_of_stock", mode='overwrite')
+    else:
+        logging.error("API validation failed")
 
 def db_table_to_silver(table_name):
 
@@ -220,6 +228,69 @@ def db_table_to_silver(table_name):
                                 , inferSchema="true"
                                 , format="csv")
 
-    logging.info(f"Saving DB table {table_name} to silver")
+    if validate_db_data(table_df, table_name):
+        logging.info(f"Saving DB table {table_name} to silver")
 
-    table_df.write.parquet(f"/silver/db/{TODAY}/{table_name}", mode='overwrite')
+        table_df.write.parquet(f"/silver/{TODAY}/{table_name}", mode='overwrite')
+    else:
+        logging.error(f"DB validation failed for {table_name}")
+
+
+def validate_api_data(df):
+    # We don't have exact requirements, hence leave it empty for now.
+    logging.info('Validating API data')
+    return 1
+
+
+def validate_db_data(df, table_name):
+    # We don't have exact requirements, hence leave it empty for now.
+    logging.info('Validating DB data')
+    return 1
+
+###########################################
+#### WH processing
+###########################################
+
+def process_api_to_gold():
+    
+    # Prepare GP creds
+    gp_creds = get_gp_creds()
+
+    gp_user = gp_creds.get("login")
+    gp_password = gp_creds.get("password")
+    gp_host = gp_creds.get("host")
+    gp_port = gp_creds.get("port")
+    gp_url = f"jdbc:postgresql://{gp_host}:{gp_port}}/postgres"
+    gp_properties = {"user": f"{gp_user}", "password": f"{gp_password}"}
+
+    # Create spark session
+    spark_session = SparkSession.builder\
+        .config('spark.driver.extraClassPath', '/home/user/shared_folder/postgresql-42.2.20.jar')\
+        .config('spark.jars', '/home/user/shared_folder/postgresql-42.2.20.jar')\
+        .master('local')\
+        .appName("gold")\
+        .getOrCreate()
+
+    # Read 'silver' data to DFs
+    api_df = spark_session.read.parquet(f'/silver/{TODAY}/out_of_stock')
+    orders_df = spark_session.read.parquet(f'/silver/{TODAY}/orders')
+    products_df = spark_session.read.parquet(f'/silver/{TODAY}/products')
+    departments_df = spark_session.read.parquet(f'/silver/{TODAY}/departments')
+    aisles_df = spark_session.read.parquet(f'/silver/{TODAY}/aisles')
+    clients_df = spark_session.read.parquet(f'/silver/{TODAY}/clients_df')
+    stores_df = spark_session.read.parquet(f'/silver/{TODAY}/stores')
+    store_types_df = spark_session.read.parquet(f'/silver/{TODAY}/store_types')
+    location_areas_df = spark_session.read.parquet(f'/silver/{TODAY}/location_areas')
+
+    # Now start joining
+
+    # def load_to_df(name):
+    #     spark_session.read.parquet(f'/silver/{TODAY}/{name}}')
+
+    # with concurrent.futures.ThreadPoolExecutor() as executor:
+    #     executor.map(process_table_hdfs, get_table_names())
+
+
+
+# if __name__ == "__main__":
+#     process_api_hdfs()

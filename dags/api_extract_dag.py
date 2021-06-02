@@ -3,7 +3,7 @@ from datetime import datetime
 from airflow import DAG
 from airflow.operators.python_operator import PythonOperator
 
-from plugins.etl import process_api_hdfs, api_to_silver
+from plugins.etl import process_api_hdfs
 
 default_args = {
     'owner': 'airflow',
@@ -16,8 +16,8 @@ default_args = {
 ##########################################################
 
 with DAG(
-    dag_id='api_data_etl',
-    description='Save data from API to bronze, then transfer to silver',
+    dag_id='etl_api_extract',
+    description='Save data from API to bronze',
     schedule_interval='@daily',
     default_args=default_args,
     start_date=datetime(2021,5,8,20,0),
@@ -25,14 +25,10 @@ with DAG(
 
 ) as api_dag:
 
-    t1 = PythonOperator(
+    api_to_bronze = PythonOperator(
         task_id='process_api_to_bronze',
         python_callable=process_api_hdfs,
         )
 
-    t2 = PythonOperator(
-        task_id='process_api_to_silver',
-        python_callable=api_to_silver,
-        )
 
-    t1 >> t2
+    api_to_bronze
