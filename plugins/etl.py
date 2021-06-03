@@ -17,8 +17,7 @@ import requests
 import sys
 
 from pyspark.sql import SparkSession
-
-import concurrent.futures
+import pyspark.sql.functions as F
 
 # Today
 TODAY = datetime.today().strftime("%Y-%d-%m") 
@@ -140,6 +139,7 @@ def get_api_data(api_base_url, out_endpoint, jwt_token, date_to_extract):
 
     except requests.HTTPError as e:
         logging.error(f"Data request to {data_url} failed with {e.args}")
+        raise requests.HTTPError
 
 
 def process_api_hdfs():
@@ -185,7 +185,7 @@ def process_api_hdfs():
 #### Silver layer processing
 ###########################################
 
-def api_to_silver():
+def api_data_to_silver():
 
     _, hdfs_params = get_hdfs_params()
     hdfs_api_folder = hdfs_params.get("hdfs_api_folder")
@@ -201,7 +201,9 @@ def api_to_silver():
         .getOrCreate()
 
     api_df = spark.read.option("multiline", "true")\
-                    .json(f"{api_file}")\
+                    .json(f"{api_file}")
+
+    api_df = api_df.distinct()
 
     if validate_api_data(api_df):
 
@@ -209,7 +211,7 @@ def api_to_silver():
         api_df.write\
             .parquet(f"/silver/{TODAY}/out_of_stock", mode='overwrite')
     else:
-        logging.error("API validation failed")
+        raise Exception("API validation failed")
 
 def db_table_to_silver(table_name):
 
@@ -228,12 +230,14 @@ def db_table_to_silver(table_name):
                                 , inferSchema="true"
                                 , format="csv")
 
+    table_df = table_df.distinct()
+
     if validate_db_data(table_df, table_name):
         logging.info(f"Saving DB table {table_name} to silver")
 
         table_df.write.parquet(f"/silver/{TODAY}/{table_name}", mode='overwrite')
     else:
-        logging.error(f"DB validation failed for {table_name}")
+        raise Exception(f"DB validation failed for {table_name}")
 
 
 def validate_api_data(df):
@@ -251,7 +255,7 @@ def validate_db_data(df, table_name):
 #### WH processing
 ###########################################
 
-def process_api_to_gold():
+def process_to_gold():
     
     # Prepare GP creds
     gp_creds = get_gp_creds()
@@ -260,7 +264,7 @@ def process_api_to_gold():
     gp_password = gp_creds.get("password")
     gp_host = gp_creds.get("host")
     gp_port = gp_creds.get("port")
-    gp_url = f"jdbc:postgresql://{gp_host}:{gp_port}}/postgres"
+    gp_url = f"jdbc:postgresql://{gp_host}:{gp_port}/postgres"
     gp_properties = {"user": f"{gp_user}", "password": f"{gp_password}"}
 
     # Create spark session
@@ -272,7 +276,8 @@ def process_api_to_gold():
         .getOrCreate()
 
     # Read 'silver' data to DFs
-    api_df = spark_session.read.parquet(f'/silver/{TODAY}/out_of_stock')
+    api_df = spark_session.read.parquet(f'/silver/{TODAY}/out_of_stock')\
+                .withColumnRenamed('date', 'oos_date')
     orders_df = spark_session.read.parquet(f'/silver/{TODAY}/orders')
     products_df = spark_session.read.parquet(f'/silver/{TODAY}/products')
     departments_df = spark_session.read.parquet(f'/silver/{TODAY}/departments')
@@ -282,15 +287,53 @@ def process_api_to_gold():
     store_types_df = spark_session.read.parquet(f'/silver/{TODAY}/store_types')
     location_areas_df = spark_session.read.parquet(f'/silver/{TODAY}/location_areas')
 
-    # Now start joining
+    # DW tables to be created
+    # facts_out_of_stock
+    # facts_orders
+    # dim_clients
+    # dim_stores
+    # dim_products
+    # See DW datagram https://lucid.app/lucidchart/a8ba63a7-b5c6-4809-a6ed-95e5c87b92b2/edit?page=0_0#
 
-    # def load_to_df(name):
-    #     spark_session.read.parquet(f'/silver/{TODAY}/{name}}')
+    # Proceed with dim_clients
+    dim_clients = clients_df\
+                    .join(location_areas_df, clients_df.location_area_id == location_areas_df.area_id)\
+                    .select(F.col('id').alias('client_id'), F.col('fullname').alias('client_name'), F.col('area'))\
+                    .orderBy(F.col('client_id'))
+    
+    dim_clients.write.jdbc(gp_url
+                      , table='dim_clients'
+                      , properties=gp_properties
+                      , mode='overwrite')
 
-    # with concurrent.futures.ThreadPoolExecutor() as executor:
-    #     executor.map(process_table_hdfs, get_table_names())
+    # Proceed with dim_stores
+    dim_stores = stores_df.join(store_types_df, stores_df.store_type_id == store_types_df.store_type_id)\
+                    .join(location_areas_df, stores_df.location_area_id == location_areas_df.area_id)\
+                    .select(F.col('store_id'), F.col('area'), F.col('type')).orderBy('store_id')
 
+    dim_stores.write.jdbc(gp_url
+                      , table='dim_stores'
+                      , properties=gp_properties
+                      , mode='overwrite')
 
+    # Proceed with dim_products
+    dim_products = products_df.join(aisles_df, aisles_df.aisle_id == products_df.aisle_id)\
+                    .join(departments_df, departments_df.department_id == products_df.department_id)\
+                    .select('product_id', 'product_name', 'department', 'aisle').orderBy('product_id')
 
-# if __name__ == "__main__":
-#     process_api_hdfs()
+    dim_products.write.jdbc(gp_url
+                      , table='dim_products'
+                      , properties=gp_properties
+                      , mode='overwrite')
+
+    # Write facts_out_of_stock table
+    api_df.write.jdbc(gp_url
+                      , table='facts_out_of_stock'
+                      , properties=gp_properties
+                      , mode='overwrite')
+
+    # Finally, Write facts_orders
+    orders_df.write.jdbc(gp_url
+                    , table='facts_orders'
+                    , properties=gp_properties
+                    , mode='overwrite')
